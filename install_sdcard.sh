@@ -1,51 +1,59 @@
 #!/bin/bash
 
-# Try to unmount partitions
-sudo umount /dev/sda8
-sudo umount /dev/sda7
-sudo umount /dev/sda6
+# Проверка root прав
+if [ "$EUID" -ne 0 ]; then
+  echo "Запустите скрипт с sudo!"
+  exit 1
+fi
 
-# Modify the repair script to use sda instead of nvme0n1
-sed 's/nvme0n1/sda/g' ~/tools/repair_device.sh > ~/tools/repair_device_sda.sh
-sudo chmod +x ~/tools/repair_device_sda.sh
-
+# Предупреждение о опасности
+echo -e "\033[1;31mВНИМАНИЕ! Этот скрипт уничтожит ВСЕ данные на /dev/sda!\033[0m"
+read -p "Вы уверены что хотите продолжить? (y/N) " -n 1 -r
 echo
-echo vvvvvvvvvv
-echo "Please press PROCEED at the FIRST prompt to start."
-echo "Then press CANCEL on the NEXT prompt to NOT reboot the machine."
-echo ^^^^^^^^^^
-echo
-sleep 3
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+  exit 1
+fi
 
-# Run the repair script
-sudo ~/tools/repair_device_sda.sh all
+# Принудительное размонтирование
+echo "Шаг 1/6: Принудительное размонтирование разделов"
+for partition in /dev/sda*; do
+  umount -l $partition 2>/dev/null
+done
+swapoff -a
 
-# Delete automount sdcard udev rule
-cmd echo "mount -o rw,remount / ; steamos-readonly disable; rm /usr/lib/udev/rules.d/99-sdcard-mount.rules" | steamos-chroot --disk /dev/sda --partset A --
+# Убийство процессов использующих диск
+echo "Шаг 2/6: Завершение процессов использующих диск"
+lsof +f -- /dev/sda* | awk 'NR>1 {print $2}' | sort | uniq | xargs -r kill -9
+sleep 2
 
-cmd echo "mount -o rw,remount / ; steamos-readonly disable; rm /usr/lib/udev/rules.d/99-sdcard-mount.rules" | steamos-chroot --disk /dev/sda --partset B --
+# Модификация скрипта восстановления
+echo "Шаг 3/6: Подготовка скрипта восстановления"
+sed 's/nvme0n1/sda/g; s/--disk "${disk}"/--disk "${disk}" --no-reread/g' ~/tools/repair_device.sh > ~/tools/repair_device_hdd.sh
+chmod +x ~/tools/repair_device_hdd.sh
 
-echo "Start to insert script!"
+# Запуск процесса установки
+echo "Шаг 4/6: Запуск установки SteamOS"
+echo -e "\n\033[33mНа первом запросе выберите PROCEED, на втором - CANCEL\033[0m\n"
+~/tools/repair_device_hdd.sh --no-reread all
 
-# Mount home partition and mkdir deck's home directory
-sudo mkdir -p /run/media/home
-sudo mount /dev/sda8 /run/media/home
-sudo mkdir -p /run/media/home/deck/ &>/dev/null
-sudo mkdir -p /run/media/home/deck/.ryanrudolf &>/dev/null
-sudo chown deck:deck /run/media/home/deck
-sudo chown deck:deck /run/media/home/deck/.ryanrudolf
+# Повторное размонтирование
+echo "Шаг 5/6: Финализация установки"
+umount -l /dev/sda* 2>/dev/null
+swapoff -a
 
-# Copy post_install script
-FILE="/run/media/home/deck/.ryanrudolf/post_install_sda.sh"
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-sudo cp "$SCRIPT_DIR/post_install_sdcard.sh" "$FILE"
-sudo chmod +x "$FILE"
-sudo chown deck:deck "$FILE"
+# Настройка окружения
+echo "Шаг 6/6: Настройка пост-установочных скриптов"
+mkdir -p /run/media/home
+mount /dev/sda8 /run/media/home
 
-# Update .profile
-cat <<EOF | sudo tee /run/media/home/deck/.profile >/dev/null
-~/.ryanrudolf/post_install_sda.sh
-EOF
+mkdir -p /run/media/home/deck/.ryanrudolf
+cp post_install_hdd.sh /run/media/home/deck/.ryanrudolf/
+chmod +x /run/media/home/deck/.ryanrudolf/post_install_hdd.sh
+chown -R deck:deck /run/media/home/deck
 
-sudo umount /run/media/home
-echo "Done!"
+# Добавление в автозагрузку
+echo "~/.ryanrudolf/post_install_hdd.sh" >> /run/media/home/deck/.profile
+
+umount /run/media/home
+
+echo -e "\n\033[32mУстановка завершена! Выполните перезагрузку.\033[0m"
